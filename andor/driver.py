@@ -29,19 +29,14 @@ class AndorCamera:
         self.x_pixels = 0
         self.y_pixels = 0
 
+    def init(self):
+        self.enable_cooling()
+        self.enable_cameralink()
+
     def close(self):
         logger.info("Closing camera")
-
-        # Close shutter
-        ret = self.sdk.SetShutter(0, atmcd_codes.Shutter_Mode.PERMANENTLY_CLOSED, 0, 0)
-        check(ret, "SetShutter")
-        logger.info("Shutter closed")
-
-        # Turn off cooler
-        ret = self.sdk.CoolerOFF()
-        check(ret, "CoolerOFF")
-        logger.info("Cooler turned off")
-
+        # self.close_shutter()
+        # self.disable_cooling()
         # Shut down SDK
         ret = self.sdk.ShutDown()
         check(ret, "ShutDown")
@@ -53,6 +48,23 @@ class AndorCamera:
 
         ret = self.sdk.CoolerON()
         check(ret, "CoolerON")
+
+        logger.info("Cooler turned on. Check if temerature is stabilized before acquireing data.")
+
+    def disable_cooling(self):
+        ret = self.sdk.CoolerOFF()
+        check(ret, "CoolerOFF")
+        logger.info("Cooler turned off")
+
+    def close_shutter(self):
+        ret = self.sdk.SetShutter(0, atmcd_codes.Shutter_Mode.PERMANENTLY_CLOSED, 0, 0)
+        check(ret, "SetShutter")
+        logger.info("Shutter closed")
+
+    def open_shutter(self):
+        ret = self.sdk.SetShutter(0, atmcd_codes.Shutter_Mode.PERMANENTLY_OPEN, 0, 0)
+        check(ret, "SetShutter")
+        logger.info("Shutter opened")
     
     def ensure_temperature_stabilized(self):
         while True:
@@ -67,10 +79,12 @@ class AndorCamera:
     def enable_cameralink(self):
         ret = self.sdk.SetCameraLinkMode(1)
         check(ret, "SetCameraLinkMode -> 1")
+        logger.info("CameraLink enabled")
 
     def disable_cameralink(self):
         ret = self.sdk.SetCameraLinkMode(0)
         check(ret, "SetCameraLinkMode -> 0")
+        logger.info("CameraLink disabled")
 
     def configure_acquisition(self, trigger="internal", exposure_time=0.01, shutter_open=True, em_gain=100, image_config=None):
         assert trigger in ["internal", "external"]
@@ -99,9 +113,11 @@ class AndorCamera:
         ret = self.sdk.SetEMGainMode(3)
         check(ret, "SetEMGainMode")
 
-        # FIXME: This way of setting EM gain is not working
-        # ret = self.sdk.SetGain(em_gain)
-        # check(ret, "SetGain")
+        ret = self.sdk.SetPreAmpGain(2)
+        check(ret, "SetPreAmpGain")
+
+        ret = self.sdk.SetEMCCDGain(em_gain)
+        check(ret, "SetEMCCDGain")
 
         if image_config is None:
             (ret, xpixels, ypixels) = self.sdk.GetDetector()
@@ -131,20 +147,39 @@ class AndorCamera:
         check(ret, "SetTriggerMode")
 
         ret = self.sdk.PrepareAcquisition()
-        print("Function PrepareAcquisition returned {}".format(ret))
+        logger.info("Function PrepareAcquisition returned {}".format(ret))
 
         self.acquisition_ready = True
 
-    def start_acquisition(self):
+    def start_acquisition(self, timeout=10.0):
         assert self.acquisition_ready, "Acquisition not ready"
-
+        self.wait_for_idle(timeout)
         ret = self.sdk.StartAcquisition()
         check(ret, "StartAcquisition")
 
-    def get_image(self):
-        # TODO: Add support for SDK-backed multiple acquisitions
-        ret = self.sdk.WaitForAcquisition()
-        print("Function WaitForAcquisition returned {}".format(ret))
+    def get_new_images_number(self):
+        (ret, first, last) = self.sdk.GetNumberNewImages()
+        check(ret, "GetNumberNewImages")
+        return last-first+1
+    
+    def wait_for_idle(self, timeout):
+        timeout_ts = time.time() + timeout
+        while True:
+            (ret, status) = self.sdk.GetStatus()
+            check(ret, "GetStatus")
+            if status == atmcd_errors.Error_Codes.DRV_IDLE:
+                break
+            else:
+                if time.time() > timeout_ts:
+                    raise TimeoutError("Did not reached DRV_IDLE in specified timeout")
+
+    def get_image(self, timeout=10.0):
+        # TODO: Add support for SDK-backed multiple acquisitions (spooling?)
+
+        # Using WaitForAcquisition is blocking, if we won't get data we'll stuck in this
+        # function.
+        # ret = self.sdk.WaitForAcquisition()
+        self.wait_for_idle(timeout)
 
         (ret, arr) = self.sdk.GetMostRecentImage16(self.x_pixels * self.y_pixels)
         check(ret, "GetMostRecentImage16")
