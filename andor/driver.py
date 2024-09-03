@@ -35,6 +35,8 @@ class AndorCamera:
 
     def close(self):
         logger.info("Closing camera")
+        # FIXME: Enable when switching between Solis and SDK will be less
+        #        frequent
         # self.close_shutter()
         # self.disable_cooling()
         # Shut down SDK
@@ -86,10 +88,19 @@ class AndorCamera:
         check(ret, "SetCameraLinkMode -> 0")
         logger.info("CameraLink disabled")
 
-    def configure_acquisition(self, trigger="internal", exposure_time=0.01, shutter_open=True, em_gain=100, image_config=None):
+    def configure_acquisition(self,
+                              trigger="internal",
+                              exposure_time=0.01,
+                              shutter_open=True,
+                              em_gain=100,
+                              image_config=None):
         assert trigger in ["internal", "external"]
 
-        ret = self.sdk.SetAcquisitionMode(atmcd_codes.Acquisition_Mode.SINGLE_SCAN)
+        # In case previous experiment did not finish properly or did not finish
+        # acquisition for any other reason
+        self.stop_acquisition()
+
+        ret = self.sdk.SetAcquisitionMode(atmcd_codes.Acquisition_Mode.RUN_TILL_ABORT)
         check(ret, "SetAcquisitionMode")
 
         ret = self.sdk.SetReadMode(atmcd_codes.Read_Mode.IMAGE)
@@ -109,8 +120,7 @@ class AndorCamera:
         check(ret, "GetAcquisitionTimings")
         logger.info(f"Reported acquisition times: exposure {fminExposure}, accumulate: {fAccumulate}, kinetic: {fKinetic}")
     
-        # Set Real EM gain mode
-        ret = self.sdk.SetEMGainMode(3)
+        ret = self.sdk.SetEMGainMode(0)
         check(ret, "SetEMGainMode")
 
         ret = self.sdk.SetPreAmpGain(2)
@@ -157,6 +167,18 @@ class AndorCamera:
         ret = self.sdk.StartAcquisition()
         check(ret, "StartAcquisition")
 
+    def stop_acquisition(self):
+        (ret, status) = self.sdk.GetStatus()
+        check(ret, "GetStatus")
+        if status == atmcd_errors.Error_Codes.DRV_ACQUIRING:
+            logger.warning("Aborting acquisition")
+            ret = self.sdk.AbortAcquisition()
+            check(ret, "AbortAcquisition")
+        elif status == atmcd_errors.Error_Codes.DRV_IDLE:
+            pass
+        else:
+            raise RuntimeError(f"Invalid state ({status})")
+
     def get_new_images_number(self):
         (ret, first, last) = self.sdk.GetNumberNewImages()
         check(ret, "GetNumberNewImages")
@@ -176,11 +198,20 @@ class AndorCamera:
     def get_image(self, timeout=10.0):
         # TODO: Add support for SDK-backed multiple acquisitions (spooling?)
 
-        # Using WaitForAcquisition is blocking, if we won't get data we'll stuck in this
-        # function.
-        # ret = self.sdk.WaitForAcquisition()
-        self.wait_for_idle(timeout)
+        # Do not use WaitForAcquisition as it is blocking. If no data is
+        # generated we'll stuck in this function.
 
+        timeout_ts = time.time() + timeout
+        while True:
+            if time.time() > timeout_ts:
+                raise TimeoutError("Did not get new data in specified timeout")
+            (ret, first, last) = self.sdk.GetNumberNewImages()
+            if ret == atmcd_errors.Error_Codes.DRV_NO_NEW_DATA:
+                continue
+            else:
+                check(ret, "GetNumberNewImages")
+                break
+        
         (ret, arr) = self.sdk.GetMostRecentImage16(self.x_pixels * self.y_pixels)
         check(ret, "GetMostRecentImage16")
 
