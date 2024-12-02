@@ -89,7 +89,7 @@ class AndorCamera:
         logger.info("CameraLink disabled")
 
     def configure_acquisition(self,
-                              trigger="internal",
+                              trigger="external",
                               exposure_time=0.01,
                               shutter_open=True,
                               em_gain=100,
